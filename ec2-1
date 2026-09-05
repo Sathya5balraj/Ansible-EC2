@@ -1,254 +1,76 @@
-================================================================================
-ANSIBLE MULTI-OS AWS INFRASTRUCTURE AUTOMATION REPORT
-================================================================================
+# Setup EC2 Collection and Authentication
 
-PROJECT OVERVIEW
-----------------
-The objective of this project was to automate the lifecycle of a hybrid cloud 
-infrastructure environment using Ansible Core running within Windows Subsystem 
-for Linux (WSL). The infrastructure encompasses multi-distribution AWS EC2 
-instances provisioned via secure, vault-encrypted credentials, automated 
-key-pair integrations, and OS-specific runtime conditionals.
+## Install boto3
 
-================================================================================
-TASK 1: PROVISIONING HYBRID EC2 INFRASTRUCTURE VIA ANSIBLE LOOPS
-================================================================================
-Objective:
-Deploy three distinct EC2 instances to AWS using an Ansible looping mechanism, 
-delegating the execution locally to the control node.
-- Instance 1 & 2: Ubuntu LTS Server
-- Instance 3: Amazon Linux / CentOS Variant
-- Target Region: us-east-1 (N. Virginia)
+```bash
+pip install boto3
+```
 
-Troubleshooting & Resolutions:
-1. Error: ansible-vault: error: unrecognized arguments: -ault-password-file
-   - Cause: Typo. Passed a single dash (-) instead of a double dash (--).
-   - Fix: Corrected command syntax flags to use full double dashes: 
-     --vault-password-file.
+## Install AWS Collection
 
-2. Error: [Errno 8] Exec format error ... vault.pass
-   - Cause: WSL Filesystem Mount Driver Limitation. Creating the flat file 
-     inside the Windows mount directory (/mnt/c/...) automatically flagged the 
-     file with executable permissions. Ansible mistook it for an executable 
-     script rather than a flat file. 
-   - Fix: Relocated vault.pass to the native, isolated Linux home directory 
-     structure (~/vault.pass) where native POSIX permissions persist perfectly. 
-     Executed 'chmod 600 ~/vault.pass' to restrict access.
+```bash
+ansible-galaxy collection install amazon.aws
+```
 
-3. Error: InvalidAMIID.NotFound
-   - Cause: Region-mismatched or outdated image tokens. 
-   - Fix: Identified explicit active image IDs for us-east-1. Updated loop 
-     sequence parameters to map 'ami-0e2c8caa4b6378d8c' for Ubuntu instances.
+## Setup Vault
 
-4. Error: InvalidKeyPair.NotFound
-   - Cause: Passed an identity string (key_name: "ansible") that did not exist 
-     in the targeted region.
-   - Fix: Generated an RSA keypair named explicitly 'ansible' inside the AWS 
-     us-east-1 EC2 Console and downloaded the .pem artifact.
+1. Create a password for vault
+```bash
+openssl rand -base64 2048 > vault.pass
+```
 
-Final Blueprint (ec2_create.yaml):
-----------------------------------
+2. Add your AWS credentials using the below vault command
+```bash
+ansible-vault create group_vars/all/pass.yml --vault-password-file vault.pass
+```
+3. Populate Vault Variables
+
+Inside your default terminal text editor, structure your AWS keys using double quotes (`""`) to escape special YAML string formatting characters like `/` and `+`:
+
+```yaml
 ---
-- name: Infrastructure Lifecycle - Provision Target Lab Nodes
+ec2_access_key: "YOUR_AWS_ACCESS_KEY_ID"
+ec2_secret_key: "YOUR_AWS_SECRET_ACCESS_KEY"
+```
+
+## Configuration Code
+
+### Main Playbook (`ec2_create.yaml`)
+
+This root entrypoint maps execution to your local machine and invokes the nested role parameters:
+
+```yaml
+---
+- name: Deploy EC2 Instance via Role
   hosts: localhost
   connection: local
-  gather_facts: false
+  roles:
+    - ec2
+```
 
-  tasks:
-    - name: Spin Up Target Cluster Instances
-      amazon.aws.ec2_instance:
-        name: "{{ item.name }}"
-        key_name: "ansible"
-        instance_type: t3.micro
-        security_group: default
-        region: us-east-1
-        aws_access_key: "{{ ec2_access_key }}"
-        aws_secret_key: "{{ ec2_secret_key }}"
-        network_interfaces:
-          - assign_public_ip: true
-        image_id: "{{ item.image }}" 
-      loop:
-        - { image: "ami-0e2c8caa4b6378d8c", name: "manage-node-1" }
-        - { image: "ami-0e2c8caa4b6378d8c", name: "manage-node-2" }
-        - { image: "ami-098c93bd9d114abc7", name: "manage-node-3" }
+### Role Tasks Execution (`ec2/tasks/main.yml`)
 
+Handles direct communication parameters with AWS infrastructure APIs:
 
-================================================================================
-TASK 2: AUTOMATED PASSWORDLESS KEY CLIENT AUTHENTICATION
-================================================================================
-Objective:
-Establish a secure connection pipeline between the local WSL shell workspace 
-and the cloud nodes without interactive login prompts or parameter injection.
-
-Troubleshooting & Resolutions:
-1. Issue: ssh-copy-id connection hang/timeout
-   - Cause: AWS cloud images disable password authentication by default. 
-     ssh-copy-id requires initial password authentication to push a key.
-   - Fix: Abandoned ssh-copy-id. Because AWS handles the ingestion of public keys 
-     into cloud targets natively via key_name declarations at launch, the 
-     infrastructure is natively passwordless from inception.
-
-2. Issue: Connection Hang using ec2-user
-   - Cause: Passed a mismatched administrative account identifier for an Ubuntu 
-     platform node (ec2-user@44.193.81.163).
-   - Fix: Adjusted variables to match OS standards: 'ubuntu' for Ubuntu systems 
-     and 'ec2-user' for Amazon Linux/CentOS systems.
-
-3. Issue: Permission denied (publickey)
-   - Cause: Executed native ssh commands without providing the underlying path (-i).
-   - Fix: Cached identity token using the Linux agent subsystem:
-     eval "$(ssh-agent -s)"
-     ssh-add /home/satbat/.ssh/ansible.pem
-
-4. Issue: Host Key Verification Prompt
-   - Cause: First-time handshake security validation warning native to SSH.
-   - Fix: Appended inline option -o StrictHostKeyChecking=no to bypass once, 
-     and updated global ansible.cfg to ignore verification permanently: 
-     host_key_checking = False.
-
-Final Blueprint (inventory.ini):
---------------------------------
-[ubuntu_nodes]
-manage-node-1 ansible_host=44.193.81.163
-manage-node-2 ansible_host=18.209.247.110
-
-[ubuntu_nodes:vars]
-ansible_user=ubuntu
-
-[amazon_nodes]
-manage-node-3 ansible_host=98.92.144.67
-
-[amazon_nodes:vars]
-ansible_user=ec2-user
-
-[aws_infrastructure:children]
-ubuntu_nodes
-amazon_nodes
-
-[aws_infrastructure:vars]
-ansible_ssh_private_key_file=/home/satbat/.ssh/ansible.pem
-
-
-================================================================================
-TASK 3: TARGETED GROUP TERMINATION VIA FACT-GATHERING CONDITIONALS
-================================================================================
-Objective:
-Execute a selective playbook routine that triggers a system halt command 
-(shutdown) exclusively on nodes belonging to the Debian (Ubuntu) ecosystem 
-while ignoring CentOS/RedHat elements.
-
-Troubleshooting & Resolutions:
-1. Error: Unrecognized property: became
-   - Cause: Syntax error. Misspelled privilege escalation directive as 'became'.
-   - Fix: Standardised syntax back to its proper parameter name: 'become: true'.
-
-2. Error: Conditional logic tracking failure
-   - Cause: Mismatched syntax structure lookup or string typos ('os.family', 
-     'Dedian', 'Redhat').
-   - Fix: Corrected syntax to ansible_facts['os_family'] and set proper noun 
-     capitalisation ('Debian' for Ubuntu; 'RedHat' for enterprise Linux).
-
-3. Error: UNREACHABLE! Connection timed out
-   - Cause: Target AWS instances were stopped or restarted, causing dynamic public 
-     IP updates on the cloud control plane.
-   - Fix: Polled AWS EC2 dashboard, fetched fresh active network endpoints, 
-     and synchronized the connection strings within inventory.ini.
-
-Final Blueprint (ec2_stop.yaml):
---------------------------------
+```yaml
 ---
-- name: Automated Infrastructure Management - Selective Shut Down
-  hosts: all
-  become: true
-  gather_facts: true
+- name: start an instance with a public IP address
+  amazon.aws.ec2_instance:
+    name: "ansible-instance"
+    instance_type: t3.micro
+    security_group: default
+    region: us-east-1
+    aws_access_key: "{{ ec2_access_key }}"
+    aws_secret_key: "{{ ec2_secret_key }}"
+    network_interfaces:
+      - assign_public_ip: true
+    image_id: ami-081b0a6eac00b4f53
+```
 
-  tasks: 
-    - name: Halt Ubuntu Target Clusters Gracefully
-      ansible.builtin.command: /sbin/shutdown -h now
-      when: ansible_facts['os_family'] == 'Debian'
-================================================================================
+## Execution
 
+Run the deployment automation block by pointing directly to your local workspace files:
 
-|| INSHORT ||
-
->> Create a password for vault
-openssl rand -base64 2048 > vault.pass
-
->> Move your password file to your Linux home directory:
-bash
-mv vault.pass ~/vault.pass
-
->> Explicitly strip the executable permissions on its new home:
-bash
-chmod 600 ~/vault.pass
-
->> Run your Ansible Vault command pointing to the new path:
-bash
-ansible-vault create group_vars/all/pass.yml --vault-password-file ~/vault.pass
-
-
->> YAML 
-
----
-- hosts: localhost
-  connection: local
-  gather_facts: false
-
-  tasks:
-    - name: Create EC2 instances
-      amazon.aws.ec2_instance:
-        name: "{{ item.name }}"
-        key_name: "ansible"
-        instance_type: t3.micro
-        security_group: default
-        region: us-east-1
-        aws_access_key: "{{ ec2_access_key }}"
-        aws_secret_key: "{{ ec2_secret_key }}"
-        network_interfaces:
-          - assign_public_ip: true
-        image_id: "{{ item.image }}" 
-      loop:
-        - { image: "ami-081b0a6eac00b4f53", name: "manage-node-1" } # Updated for us-east-1
-        - { image: "ami-0e2c8caa4b6378d8c", name: "manage-node-2" } # Updated for us-east-1
-        - { image: "ami-0e2c8caa4b6378d8c", name: "manage-node-3" } # Updated for us-east-1
-
-
->> ansible-playbook ec2_create.yaml --vault-password-file ~/vault.pass
-
-
->> ansible-playbook -i inventory.ini ec2-create.yml --vault-password-file ~/vault.pass
-
-
->> P/W less authentication
-
-ssh -i /home/satbat/.ssh/ansible.pem ec2-user@98.92.144.67
-ssh ec2-user@98.92.144.67
-
-ssh -i /home/satbat/.ssh/ansible.pem ubuntu@44.193.81.163
-ssh ubuntu@44.193.81.163
-
-ssh -i /home/satbat/.ssh/ansible.pem ubuntu@98.92.144.67
-ssh ubuntu@98.92.144.67
-
-
->> INVENTORY
-
-[all]
-ec2-user@98.92.144.67
-ubuntu@44.193.81.163
-ubuntu@3.80.164.84
-
-
->> STOP YAML
-
----
-- hosts: all
-  become: true
-
-  tasks: 
-    - name: shutdown ubuntu istance only
-      ansible.builtin.command: /sbin/shutdown -h now
-      when:
-       ansible_facts['os_family'] == 'Debian' # 'Redhat'
-
->> ansible-playbook -i inventory.ini ec2_stop.yaml --vault-password-file ~/vault.pass
+```bash
+ansible-playbook -i inventory.ini ec2_create.yaml --vault-password-file ~/vault.pass
+```
